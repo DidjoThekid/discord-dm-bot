@@ -91,4 +91,4 @@ if __name__ == "__main__":
         raise RuntimeError(
             "DISCORD_TOKEN manquant. Crée un fichier .env avec DISCORD_TOKEN=ton_token"
         )
-    bot.run(MTUzNTM2MTQ0NTg1MDY0ODYwNg.Gl5vm_.2bKPJ97dJIlMlj5nGua4kH5boe_YP3CyREIDaw)
+    bot.run(TOKEN)
