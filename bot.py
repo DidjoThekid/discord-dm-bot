@@ -3,6 +3,7 @@ Bot Discord — envoi et réception de messages privés (DM)
 """
 
 import os
+import asyncio
 import logging
 
 import discord
@@ -24,6 +25,7 @@ log = logging.getLogger("dm-bot")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.dm_messages = True
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -82,6 +84,59 @@ async def send_dm_error(ctx: commands.Context, error):
         await ctx.send("Usage : `!dm <user_id> <message>`")
     elif isinstance(error, commands.BadArgument):
         await ctx.send("❌ L'ID utilisateur doit être un nombre valide.")
+    else:
+        raise error
+
+
+@bot.command(name="dmrole")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def send_dm_role(ctx: commands.Context, role: discord.Role, *, message: str):
+    """Envoie un DM à tous les membres possédant un rôle donné."""
+    members = [m for m in role.members if not m.bot]
+
+    if not members:
+        await ctx.send(f"⚠️ Aucun membre humain n'a le rôle **{role.name}**.")
+        return
+
+    status_msg = await ctx.send(
+        f"📤 Envoi du message à **{len(members)}** membre(s) ayant le rôle **{role.name}**..."
+    )
+
+    sent, failed = 0, 0
+    for member in members:
+        try:
+            await member.send(message)
+            sent += 1
+            log.info(f"[DM envoyé - rôle {role.name}] à {member} ({member.id})")
+        except discord.Forbidden:
+            failed += 1
+            log.warning(f"[DM échoué - rôle {role.name}] à {member} ({member.id}) : DM fermés")
+        except Exception as e:
+            failed += 1
+            log.exception(f"[DM échoué - rôle {role.name}] à {member} ({member.id})")
+
+        await asyncio.sleep(1)
+
+    await status_msg.edit(
+        content=(
+            f"✅ Terminé — message envoyé à **{sent}/{len(members)}** membre(s) "
+            f"du rôle **{role.name}**"
+            + (f" ({failed} échec(s), probablement des DM fermés)." if failed else ".")
+        )
+    )
+
+
+@send_dm_role.error
+async def send_dm_role_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage : `!dmrole <@rôle ou ID_du_rôle> <message>`")
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ Rôle introuvable. Mentionne le rôle (@rôle) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
     else:
         raise error
 
