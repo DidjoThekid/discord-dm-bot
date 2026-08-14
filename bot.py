@@ -264,27 +264,4 @@ async def unlock_post(ctx: commands.Context, thread: discord.Thread = None):
         await ctx.send(f"🔓 Le post **{thread.name}** a été déverrouillé.")
         log.info(f"[Post déverrouillé] {thread.name} ({thread.id})")
     except discord.Forbidden:
-        await ctx.send("❌ Le bot n'a pas la permission de déverrouiller ce post.")
-    except Exception as e:
-        await ctx.send(f"❌ Erreur : {e}")
-        log.exception("Erreur lors du déverrouillage du post")
-
-
-@unlock_post.error
-async def unlock_post_error(ctx: commands.Context, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
-    elif isinstance(error, commands.ChannelNotFound):
-        await ctx.send("❌ Post introuvable. Donne son ID ou utilise la commande dans le post.")
-    elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
-    else:
-        raise error
-
-
-if __name__ == "__main__":
-    if not TOKEN:
-        raise RuntimeError(
-            "DISCORD_TOKEN manquant. Crée un fichier .env avec DISCORD_TOKEN=ton_token"
-        )
-    bot.run(TOKEN)
+        await
