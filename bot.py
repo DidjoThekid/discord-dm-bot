@@ -264,4 +264,72 @@ async def unlock_post(ctx: commands.Context, thread: discord.Thread = None):
         await ctx.send(f"🔓 Le post **{thread.name}** a été déverrouillé.")
         log.info(f"[Post déverrouillé] {thread.name} ({thread.id})")
     except discord.Forbidden:
-        await
+        await ctx.send("❌ Le bot n'a pas la permission de déverrouiller ce post.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors du déverrouillage du post")
+
+
+@unlock_post.error
+async def unlock_post_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Post introuvable. Donne son ID ou utilise la commande dans le post.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="deletepost")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def delete_post(ctx: commands.Context, thread: discord.Thread = None):
+    """Supprime définitivement un post (thread). Sans argument, supprime le post dans lequel la commande est tapée."""
+    thread = thread or (ctx.channel if isinstance(ctx.channel, discord.Thread) else None)
+
+    if thread is None:
+        await ctx.send(
+            "❌ Aucun post ciblé. Utilise cette commande à l'intérieur d'un post, "
+            "ou donne son ID/lien : `!deletepost <ID_du_post>`."
+        )
+        return
+
+    thread_name = thread.name
+    was_current_channel = thread.id == ctx.channel.id
+
+    try:
+        if was_current_channel:
+            await ctx.send(f"🗑️ Suppression du post **{thread_name}**...")
+
+        await thread.delete()
+        log.info(f"[Post supprimé] {thread_name} ({thread.id})")
+
+        if not was_current_channel:
+            await ctx.send(f"🗑️ Le post **{thread_name}** a été supprimé.")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de supprimer ce post.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors de la suppression du post")
+
+
+@delete_post.error
+async def delete_post_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Post introuvable. Donne son ID ou utilise la commande dans le post.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise RuntimeError(
+            "DISCORD_TOKEN manquant. Crée un fichier .env avec DISCORD_TOKEN=ton_token"
+        )
+    bot.run(TOKEN)
