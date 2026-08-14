@@ -141,6 +141,147 @@ async def send_dm_role_error(ctx: commands.Context, error):
         raise error
 
 
+@bot.command(name="send")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def send_to_channel(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
+    """Envoie un message dans un salon donné."""
+    try:
+        await channel.send(message)
+        await ctx.send(f"✅ Message envoyé dans {channel.mention}.")
+        log.info(f"[Message envoyé] dans #{channel.name} : {message}")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission d'écrire dans ce salon.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors de l'envoi dans le salon")
+
+
+@send_to_channel.error
+async def send_to_channel_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage : `!send <#salon> <message>`")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Salon introuvable. Mentionne le salon (#salon) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="post")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def create_post(
+    ctx: commands.Context,
+    forum: discord.ForumChannel,
+    titre: str,
+    *,
+    message: str,
+):
+    """Crée un nouveau post dans un salon de type Forum. Le titre doit être entre guillemets s'il contient des espaces."""
+    try:
+        result = await forum.create_thread(name=titre, content=message)
+        thread = result.thread if hasattr(result, "thread") else result
+        await ctx.send(f"✅ Post créé : {thread.mention}")
+        log.info(f"[Post créé] dans #{forum.name} : {titre}")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de créer un post dans ce forum.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors de la création du post")
+
+
+@create_post.error
+async def create_post_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send('Usage : `!post <#forum> "Titre du post" <message>`')
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Salon de forum introuvable. Mentionne-le (#forum) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="lock")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def lock_post(ctx: commands.Context, thread: discord.Thread = None):
+    """Verrouille un post (thread). Sans argument, verrouille le post dans lequel la commande est tapée."""
+    thread = thread or (ctx.channel if isinstance(ctx.channel, discord.Thread) else None)
+
+    if thread is None:
+        await ctx.send(
+            "❌ Aucun post ciblé. Utilise cette commande à l'intérieur d'un post, "
+            "ou donne son ID/lien : `!lock <ID_du_post>`."
+        )
+        return
+
+    try:
+        await thread.edit(locked=True, archived=True)
+        await ctx.send(f"🔒 Le post **{thread.name}** a été verrouillé.")
+        log.info(f"[Post verrouillé] {thread.name} ({thread.id})")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de verrouiller ce post.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors du verrouillage du post")
+
+
+@lock_post.error
+async def lock_post_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Post introuvable. Donne son ID ou utilise la commande dans le post.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="unlock")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def unlock_post(ctx: commands.Context, thread: discord.Thread = None):
+    """Déverrouille un post (thread). Sans argument, déverrouille le post dans lequel la commande est tapée."""
+    thread = thread or (ctx.channel if isinstance(ctx.channel, discord.Thread) else None)
+
+    if thread is None:
+        await ctx.send(
+            "❌ Aucun post ciblé. Utilise cette commande à l'intérieur d'un post, "
+            "ou donne son ID/lien : `!unlock <ID_du_post>`."
+        )
+        return
+
+    try:
+        await thread.edit(locked=False, archived=False)
+        await ctx.send(f"🔓 Le post **{thread.name}** a été déverrouillé.")
+        log.info(f"[Post déverrouillé] {thread.name} ({thread.id})")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de déverrouiller ce post.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors du déverrouillage du post")
+
+
+@unlock_post.error
+async def unlock_post_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Post introuvable. Donne son ID ou utilise la commande dans le post.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError(
