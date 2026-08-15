@@ -14,6 +14,10 @@ Fonctionnalités :
 - Les commandes !lock et !unlock permettent de verrouiller/déverrouiller
   un post.
 - La commande !deletepost permet de supprimer définitivement un post.
+- La commande !call ouvre un salon vocal privé avec un membre, avec un
+  message vocal d'accueil.
+- Les commandes !hold et !unhold mettent un appel en attente (sourdine +
+  message vocal) puis le reprennent.
 - Tous les DM reçus sont affichés dans la console, et peuvent être relayés
   vers un salon serveur si tu configures DM_LOG_CHANNEL_ID.
 
@@ -429,6 +433,29 @@ async def delete_post_error(ctx: commands.Context, error):
 # et sortir librement (donc "s'appeler" dans les deux sens).
 # ---------------------------------------------------------------------------
 
+async def generate_tts_audio(text: str) -> str:
+    """Génère un fichier audio (mp3) à partir d'un texte."""
+    path = f"/tmp/tts_{int(time.time() * 1000)}.mp3"
+    tts = gTTS(text=text, lang="fr")
+    await asyncio.to_thread(tts.save, path)
+    return path
+
+
+async def play_in_voice_channel(voice_channel: discord.VoiceChannel, text: str):
+    """Fait rejoindre le salon vocal par le bot, joue un message, puis ressort."""
+    audio_path = None
+    try:
+        vc = await voice_channel.connect()
+        audio_path = await generate_tts_audio(text)
+        vc.play(discord.FFmpegPCMAudio(audio_path))
+        while vc.is_playing():
+            await asyncio.sleep(1)
+        await vc.disconnect()
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+
+
 async def generate_call_announcement() -> str:
     """Génère un fichier audio (mp3) avec le message d'accueil de l'appel."""
     text = (
@@ -436,10 +463,7 @@ async def generate_call_announcement() -> str:
         "Merci de patienter. Vous pouvez nous appeler à tout moment, "
         "et nous pouvons également vous appeler."
     )
-    path = f"/tmp/call_announcement_{int(time.time())}.mp3"
-    tts = gTTS(text=text, lang="fr")
-    await asyncio.to_thread(tts.save, path)
-    return path
+    return await generate_tts_audio(text)
 
 
 @bot.command(name="call")
@@ -488,19 +512,15 @@ async def call_user(ctx: commands.Context, member: discord.Member):
         pass  # La personne a fermé ses DM — on continue quand même
 
     # Le bot rejoint le salon et joue le message vocal d'accueil
-    audio_path = None
     try:
-        vc = await voice_channel.connect()
-        audio_path = await generate_call_announcement()
-        vc.play(discord.FFmpegPCMAudio(audio_path))
-        while vc.is_playing():
-            await asyncio.sleep(1)
-        await vc.disconnect()
-    except Exception as e:
+        await play_in_voice_channel(
+            voice_channel,
+            "Bonjour, un membre de la Team D T K va prendre votre appel en charge. "
+            "Merci de patienter. Vous pouvez nous appeler à tout moment, "
+            "et nous pouvons également vous appeler.",
+        )
+    except Exception:
         log.exception("Erreur lors de la lecture du message vocal d'accueil")
-    finally:
-        if audio_path and os.path.exists(audio_path):
-            os.remove(audio_path)
 
 
 @call_user.error
@@ -509,6 +529,141 @@ async def call_user_error(ctx: commands.Context, error):
         await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage : `!call <@membre>`")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+# ---------------------------------------------------------------------------
+# Mettre un appel en attente / le reprendre
+# Usage : !hold [@membre]     (sans argument = ton propre salon vocal actuel)
+#         !unhold [@membre]
+#
+# Met en sourdine (server mute) les membres qui ne font pas partie de la
+# Team DTK dans le salon vocal ciblé, et joue un message vocal expliquant
+# la mise en attente. !unhold fait l'inverse.
+# ---------------------------------------------------------------------------
+
+def resolve_voice_channel(ctx: commands.Context, member: discord.Member = None):
+    """Détermine le salon vocal ciblé : celui du membre donné, sinon celui de l'auteur de la commande."""
+    if member and member.voice:
+        return member.voice.channel
+    if ctx.author.voice:
+        return ctx.author.voice.channel
+    return None
+
+
+def is_staff(member: discord.Member) -> bool:
+    if STAFF_ROLE_ID is None:
+        return False
+    return any(role.id == STAFF_ROLE_ID for role in member.roles)
+
+
+@bot.command(name="hold")
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
+@commands.guild_only()
+async def hold_call(ctx: commands.Context, member: discord.Member = None):
+    """Met l'appel en attente : sourdine des non-staff + message vocal."""
+    voice_channel = resolve_voice_channel(ctx, member)
+
+    if voice_channel is None:
+        await ctx.send(
+            "❌ Aucun salon vocal ciblé. Connecte-toi à un salon vocal, ou précise "
+            "un membre déjà connecté : `!hold @membre`."
+        )
+        return
+
+    muted = []
+    try:
+        for vc_member in voice_channel.members:
+            if vc_member.bot or is_staff(vc_member):
+                continue
+            if not vc_member.voice.mute:
+                try:
+                    await vc_member.edit(mute=True)
+                    muted.append(vc_member)
+                except discord.Forbidden:
+                    pass
+
+        await ctx.send(
+            f"⏸️ Appel mis en attente dans **{voice_channel.name}** "
+            f"({len(muted)} membre(s) mis en sourdine)."
+        )
+        await play_in_voice_channel(
+            voice_channel,
+            "Votre appel a été mis en attente. Merci de patienter, "
+            "un membre de la Team D T K va reprendre la conversation.",
+        )
+        log.info(f"[Appel en attente] {voice_channel.name} — {len(muted)} membre(s) mis en sourdine")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de gérer ce salon vocal.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors de la mise en attente de l'appel")
+
+
+@hold_call.error
+async def hold_call_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="unhold")
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
+@commands.guild_only()
+async def unhold_call(ctx: commands.Context, member: discord.Member = None):
+    """Reprend l'appel : lève la sourdine des non-staff + message vocal."""
+    voice_channel = resolve_voice_channel(ctx, member)
+
+    if voice_channel is None:
+        await ctx.send(
+            "❌ Aucun salon vocal ciblé. Connecte-toi à un salon vocal, ou précise "
+            "un membre déjà connecté : `!unhold @membre`."
+        )
+        return
+
+    unmuted = []
+    try:
+        for vc_member in voice_channel.members:
+            if vc_member.bot or is_staff(vc_member):
+                continue
+            if vc_member.voice.mute:
+                try:
+                    await vc_member.edit(mute=False)
+                    unmuted.append(vc_member)
+                except discord.Forbidden:
+                    pass
+
+        await ctx.send(
+            f"▶️ Appel repris dans **{voice_channel.name}** "
+            f"({len(unmuted)} membre(s) démis de sourdine)."
+        )
+        await play_in_voice_channel(
+            voice_channel,
+            "Merci de votre patience. Un membre de la Team D T K "
+            "reprend votre appel dès maintenant.",
+        )
+        log.info(f"[Appel repris] {voice_channel.name} — {len(unmuted)} membre(s) démis de sourdine")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de gérer ce salon vocal.")
+    except Exception as e:
+        await ctx.send(f"❌ Erreur : {e}")
+        log.exception("Erreur lors de la reprise de l'appel")
+
+
+@unhold_call.error
+async def unhold_call_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
     elif isinstance(error, commands.NoPrivateMessage):
