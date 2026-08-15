@@ -20,6 +20,9 @@ Fonctionnalités :
   @membre) reste réservé aux admins.
 - Les commandes !hold et !unhold mettent un appel en attente (sourdine +
   message vocal) puis le reprennent.
+- Les commandes !closecalls et !opencalls permettent de fermer/rouvrir
+  le service d'appel. Fermé, !call joue un message vocal d'indisponibilité
+  et exclut la personne du salon vocal.
 - Tous les DM reçus sont affichés dans la console, et peuvent être relayés
   vers un salon serveur si tu configures DM_LOG_CHANNEL_ID.
 
@@ -480,6 +483,54 @@ async def generate_call_announcement() -> str:
     return await generate_tts_audio(text)
 
 
+# État global du service d'appel : True = ouvert, False = fermé.
+# ⚠️ Cette valeur est réinitialisée à True à chaque redémarrage du bot
+# (par exemple lors d'un redéploiement Railway).
+call_service_open = True
+
+
+@bot.command(name="closecalls")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def close_calls(ctx: commands.Context):
+    """Ferme le service d'appel : !call sera refusé jusqu'à !opencalls."""
+    global call_service_open
+    call_service_open = False
+    await ctx.send("🔴 Le service d'appel (`!call`) est maintenant **fermé**.")
+    log.info(f"[Service d'appel fermé] par {ctx.author} ({ctx.author.id})")
+
+
+@close_calls.error
+async def close_calls_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.command(name="opencalls")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def open_calls(ctx: commands.Context):
+    """Rouvre le service d'appel."""
+    global call_service_open
+    call_service_open = True
+    await ctx.send("🟢 Le service d'appel (`!call`) est maintenant **ouvert**.")
+    log.info(f"[Service d'appel rouvert] par {ctx.author} ({ctx.author.id})")
+
+
+@open_calls.error
+async def open_calls_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
 @bot.command(name="call")
 @commands.guild_only()
 async def call_user(ctx: commands.Context, member: discord.Member = None):
@@ -496,6 +547,34 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
             "❌ Tu ne peux pas ouvrir un appel pour quelqu'un d'autre. "
             "Utilise `!call` sans argument pour ouvrir ton propre appel avec la Team DTK."
         )
+        return
+
+    if not call_service_open:
+        await ctx.send(
+            "📞 Le service d'appel est actuellement **fermé**. Merci de réessayer plus tard."
+        )
+
+        requester = ctx.author
+        voice_channel = requester.voice.channel if requester.voice else None
+
+        if voice_channel:
+            try:
+                await play_in_voice_channel(
+                    voice_channel,
+                    "Nos services d'appel sont fermés. Veuillez rappeler plus tard.",
+                )
+            except Exception:
+                log.exception("Erreur lors de la lecture du message de fermeture")
+
+            try:
+                # Exclut la personne du salon vocal
+                if requester.voice and requester.voice.channel:
+                    await requester.move_to(None)
+            except discord.Forbidden:
+                log.warning(
+                    f"Impossible d'exclure {requester} du vocal : permission "
+                    "'Déplacer des membres' manquante."
+                )
         return
 
     guild = ctx.guild
