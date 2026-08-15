@@ -588,11 +588,62 @@ def is_staff(member: discord.Member) -> bool:
     return any(role.id == STAFF_ROLE_ID for role in member.roles)
 
 
+# Salons actuellement en attente : {guild_id: {"voice_client": vc, "music_path": str}}
+active_holds: dict = {}
+
+
+def get_hold_music_path() -> str:
+    """Renvoie le chemin d'un fichier audio à utiliser comme musique d'attente.
+    Si un fichier assets/hold_music.mp3 existe dans le projet, il est utilisé
+    en priorité. Sinon, une petite mélodie douce est générée automatiquement
+    (aucun droit d'auteur, générée localement)."""
+    custom_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "assets", "hold_music.mp3"
+    )
+    if os.path.exists(custom_path):
+        return custom_path
+    return ensure_generated_hold_music()
+
+
+def ensure_generated_hold_music() -> str:
+    """Génère (une seule fois, puis met en cache) une courte mélodie douce en boucle."""
+    generated_path = "/tmp/hold_music_generated.wav"
+    if os.path.exists(generated_path):
+        return generated_path
+
+    import wave
+    import struct
+    import math as _math
+
+    framerate = 44100
+    notes = [261.63, 329.63, 392.00, 329.63]  # petit arpège doux (Do-Mi-Sol-Mi)
+    note_duration = 0.5
+    volume = 0.18
+
+    frames = bytearray()
+    for note_freq in notes:
+        n_samples = int(framerate * note_duration)
+        fade_samples = int(framerate * 0.05)
+        for i in range(n_samples):
+            t = i / framerate
+            fade = min(1.0, i / fade_samples, (n_samples - i) / fade_samples)
+            sample = volume * fade * _math.sin(2 * _math.pi * note_freq * t)
+            frames += struct.pack("<h", int(sample * 32767))
+
+    with wave.open(generated_path, "w") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(framerate)
+        wav_file.writeframes(frames)
+
+    return generated_path
+
+
 @bot.command(name="hold")
 @commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def hold_call(ctx: commands.Context, member: discord.Member = None):
-    """Met l'appel en attente : sourdine des non-staff + message vocal."""
+    """Met l'appel en attente : sourdine des non-staff + musique d'attente en boucle."""
     voice_channel = resolve_voice_channel(ctx, member)
 
     if voice_channel is None:
@@ -602,7 +653,13 @@ async def hold_call(ctx: commands.Context, member: discord.Member = None):
         )
         return
 
+    guild = ctx.guild
+    if guild.id in active_holds:
+        await ctx.send("⚠️ Un appel est déjà en attente sur ce serveur. Utilise `!unhold` d'abord.")
+        return
+
     muted = []
+    vc = None
     try:
         for vc_member in voice_channel.members:
             if vc_member.bot or is_staff(vc_member):
@@ -614,21 +671,44 @@ async def hold_call(ctx: commands.Context, member: discord.Member = None):
                 except discord.Forbidden:
                     pass
 
+        # Connexion (ou déplacement) du bot dans le salon vocal
+        existing_vc = guild.voice_client
+        if existing_vc and existing_vc.is_connected():
+            await existing_vc.move_to(voice_channel)
+            vc = existing_vc
+        else:
+            vc = await voice_channel.connect()
+
+        # Message d'annonce de mise en attente
+        announce_path = await generate_tts_audio(
+            "Votre appel a été mis en attente. Merci de patienter, "
+            "un membre de la Team D T K va reprendre la conversation."
+        )
+        vc.play(discord.FFmpegPCMAudio(announce_path))
+        while vc.is_playing():
+            await asyncio.sleep(1)
+        os.remove(announce_path)
+
+        # Musique d'attente, jouée en boucle jusqu'à !unhold
+        music_path = get_hold_music_path()
+        vc.play(discord.FFmpegPCMAudio(music_path, before_options="-stream_loop -1"))
+        active_holds[guild.id] = {"voice_client": vc, "music_path": music_path}
+
         await ctx.send(
             f"⏸️ Appel mis en attente dans **{voice_channel.name}** "
-            f"({len(muted)} membre(s) mis en sourdine)."
-        )
-        await play_in_voice_channel(
-            voice_channel,
-            "Votre appel a été mis en attente. Merci de patienter, "
-            "un membre de la Team D T K va reprendre la conversation.",
+            f"({len(muted)} membre(s) mis en sourdine) — musique d'attente lancée."
         )
         log.info(f"[Appel en attente] {voice_channel.name} — {len(muted)} membre(s) mis en sourdine")
     except discord.Forbidden:
         await ctx.send("❌ Le bot n'a pas la permission de gérer ce salon vocal.")
+        if vc and vc.is_connected():
+            await vc.disconnect(force=True)
     except Exception as e:
         await ctx.send(f"❌ Erreur : {e}")
         log.exception("Erreur lors de la mise en attente de l'appel")
+        if vc and vc.is_connected():
+            await vc.disconnect(force=True)
+        active_holds.pop(guild.id, None)
 
 
 @hold_call.error
@@ -647,7 +727,7 @@ async def hold_call_error(ctx: commands.Context, error):
 @commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def unhold_call(ctx: commands.Context, member: discord.Member = None):
-    """Reprend l'appel : lève la sourdine des non-staff + message vocal."""
+    """Reprend l'appel : arrête la musique d'attente, lève la sourdine des non-staff + message vocal."""
     voice_channel = resolve_voice_channel(ctx, member)
 
     if voice_channel is None:
@@ -656,6 +736,9 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
             "un membre déjà connecté : `!unhold @membre`."
         )
         return
+
+    guild = ctx.guild
+    hold_info = active_holds.pop(guild.id, None)
 
     unmuted = []
     try:
@@ -669,14 +752,27 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
                 except discord.Forbidden:
                     pass
 
+        vc = guild.voice_client
+        if vc and vc.is_connected():
+            vc.stop()  # coupe la musique d'attente en cours
+            if vc.channel.id != voice_channel.id:
+                await vc.move_to(voice_channel)
+        else:
+            vc = await voice_channel.connect()
+
+        resume_path = await generate_tts_audio(
+            "Merci de votre patience. Un membre de la Team D T K "
+            "reprend votre appel dès maintenant."
+        )
+        vc.play(discord.FFmpegPCMAudio(resume_path))
+        while vc.is_playing():
+            await asyncio.sleep(1)
+        os.remove(resume_path)
+        await vc.disconnect(force=True)
+
         await ctx.send(
             f"▶️ Appel repris dans **{voice_channel.name}** "
             f"({len(unmuted)} membre(s) démis de sourdine)."
-        )
-        await play_in_voice_channel(
-            voice_channel,
-            "Merci de votre patience. Un membre de la Team D T K "
-            "reprend votre appel dès maintenant.",
         )
         log.info(f"[Appel repris] {voice_channel.name} — {len(unmuted)} membre(s) démis de sourdine")
     except discord.Forbidden:
