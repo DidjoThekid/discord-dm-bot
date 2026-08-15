@@ -444,16 +444,28 @@ async def generate_tts_audio(text: str) -> str:
 
 
 async def play_in_voice_channel(voice_channel: discord.VoiceChannel, text: str):
-    """Fait rejoindre le salon vocal par le bot, joue un message, puis ressort."""
+    """Fait rejoindre le salon vocal par le bot, joue un message, puis ressort.
+    Réutilise une connexion vocale existante si le bot est déjà connecté dans
+    ce serveur, et se déconnecte toujours proprement même en cas d'erreur."""
     audio_path = None
+    guild = voice_channel.guild
+    vc = guild.voice_client
     try:
-        vc = await voice_channel.connect()
+        if vc and vc.is_connected():
+            await vc.move_to(voice_channel)
+        else:
+            vc = await voice_channel.connect()
+
         audio_path = await generate_tts_audio(text)
         vc.play(discord.FFmpegPCMAudio(audio_path))
         while vc.is_playing():
             await asyncio.sleep(1)
-        await vc.disconnect()
     finally:
+        if vc and vc.is_connected():
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                log.exception("Erreur lors de la déconnexion du salon vocal")
         if audio_path and os.path.exists(audio_path):
             os.remove(audio_path)
 
