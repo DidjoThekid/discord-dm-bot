@@ -15,7 +15,9 @@ Fonctionnalités :
   un post.
 - La commande !deletepost permet de supprimer définitivement un post.
 - La commande !call ouvre un salon vocal privé avec un membre, avec un
-  message vocal d'accueil.
+  message vocal d'accueil. Accessible à TOUT LE MONDE pour s'appeler
+  soi-même (!call sans argument) ; cibler quelqu'un d'autre (!call
+  @membre) reste réservé aux admins.
 - Les commandes !hold et !unhold mettent un appel en attente (sourdine +
   message vocal) puis le reprennent.
 - Tous les DM reçus sont affichés dans la console, et peuvent être relayés
@@ -467,10 +469,23 @@ async def generate_call_announcement() -> str:
 
 
 @bot.command(name="call")
-@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
-async def call_user(ctx: commands.Context, member: discord.Member):
-    """Crée un salon vocal privé pour appeler un membre, avec une annonce vocale."""
+async def call_user(ctx: commands.Context, member: discord.Member = None):
+    """
+    Ouvre un appel privé avec la Team DTK.
+    - Sans argument : ouvre un appel pour toi-même (accessible à tout le monde).
+    - Avec un membre en argument : ouvre un appel ciblant ce membre
+      (réservé aux administrateurs).
+    """
+    if member is None:
+        member = ctx.author
+    elif not ctx.author.guild_permissions.administrator:
+        await ctx.send(
+            "❌ Tu ne peux pas ouvrir un appel pour quelqu'un d'autre. "
+            "Utilise `!call` sans argument pour ouvrir ton propre appel avec la Team DTK."
+        )
+        return
+
     guild = ctx.guild
     category = guild.get_channel(CALL_CATEGORY_ID) if CALL_CATEGORY_ID else None
 
@@ -479,12 +494,11 @@ async def call_user(ctx: commands.Context, member: discord.Member):
         member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
     }
-    if STAFF_ROLE_ID:
-        staff_role = guild.get_role(STAFF_ROLE_ID)
-        if staff_role:
-            overwrites[staff_role] = discord.PermissionOverwrite(
-                view_channel=True, connect=True, speak=True
-            )
+    staff_role = guild.get_role(STAFF_ROLE_ID) if STAFF_ROLE_ID else None
+    if staff_role:
+        overwrites[staff_role] = discord.PermissionOverwrite(
+            view_channel=True, connect=True, speak=True
+        )
 
     channel_name = f"appel-{member.name}"[:100]
 
@@ -500,16 +514,20 @@ async def call_user(ctx: commands.Context, member: discord.Member):
         log.exception("Erreur lors de la création du salon d'appel")
         return
 
-    await ctx.send(f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention}")
+    staff_ping = staff_role.mention if staff_role else ""
+    await ctx.send(
+        f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention} {staff_ping}"
+    )
 
-    try:
-        await member.send(
-            f"📞 Un appel privé a été ouvert pour toi sur **{guild.name}**.\n"
-            f"Rejoins le salon vocal **{voice_channel.name}** quand tu veux — "
-            "un membre de la Team DTK va prendre ton appel en charge."
-        )
-    except discord.Forbidden:
-        pass  # La personne a fermé ses DM — on continue quand même
+    if member != ctx.author:
+        try:
+            await member.send(
+                f"📞 Un appel privé a été ouvert pour toi sur **{guild.name}**.\n"
+                f"Rejoins le salon vocal **{voice_channel.name}** quand tu veux — "
+                "un membre de la Team DTK va prendre ton appel en charge."
+            )
+        except discord.Forbidden:
+            pass  # La personne a fermé ses DM — on continue quand même
 
     # Le bot rejoint le salon et joue le message vocal d'accueil
     try:
@@ -525,11 +543,7 @@ async def call_user(ctx: commands.Context, member: discord.Member):
 
 @call_user.error
 async def call_user_error(ctx: commands.Context, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Usage : `!call <@membre>`")
-    elif isinstance(error, commands.MemberNotFound):
+    if isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
     elif isinstance(error, commands.NoPrivateMessage):
         await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
