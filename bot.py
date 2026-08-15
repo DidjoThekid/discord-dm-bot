@@ -1,20 +1,64 @@
 """
 Bot Discord — envoi et réception de messages privés (DM)
+==========================================================
+
+Fonctionnalités :
+- Le bot répond automatiquement aux DM qu'il reçoit (les log dans la console
+  et peut renvoyer une réponse).
+- La commande !dm permet à un admin d'envoyer un DM à un utilisateur via
+  son ID Discord.
+- La commande !dmrole permet à un admin d'envoyer un DM à TOUS les membres
+  possédant un rôle donné (ex: !dmrole @Membres Salut à tous !).
+- La commande !send permet d'envoyer un message dans un salon du serveur.
+- La commande !post permet de créer un nouveau post dans un salon Forum.
+- Les commandes !lock et !unlock permettent de verrouiller/déverrouiller
+  un post.
+- La commande !deletepost permet de supprimer définitivement un post.
+- Tous les DM reçus sont affichés dans la console, et peuvent être relayés
+  vers un salon serveur si tu configures DM_LOG_CHANNEL_ID.
+
+Installation :
+    pip install -U discord.py python-dotenv
+
+Configuration :
+    1. Crée un fichier .env (voir .env.example) avec ton token de bot.
+    2. Active l'intent "Message Content" dans le portail développeur Discord
+       (https://discord.com/developers/applications -> ton appli -> Bot ->
+       Privileged Gateway Intents -> MESSAGE CONTENT INTENT).
+    3. Invite le bot sur un serveur (voir README.md pour le lien d'invitation).
+
+Lancement :
+    python bot.py
 """
 
 import os
 import asyncio
+import time
 import logging
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
+from gtts import gTTS
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+# ID du salon (dans un serveur) où relayer une copie des DM reçus. Optionnel.
 DM_LOG_CHANNEL_ID = os.getenv("DM_LOG_CHANNEL_ID")
 DM_LOG_CHANNEL_ID = int(DM_LOG_CHANNEL_ID) if DM_LOG_CHANNEL_ID else None
+
+# ID du rôle "Team DTK" (ou équivalent) qui doit voir/rejoindre les appels privés.
+STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID")
+STAFF_ROLE_ID = int(STAFF_ROLE_ID) if STAFF_ROLE_ID else None
+
+# ID d'une catégorie où ranger les salons d'appel créés. Optionnel.
+CALL_CATEGORY_ID = os.getenv("CALL_CATEGORY_ID")
+CALL_CATEGORY_ID = int(CALL_CATEGORY_ID) if CALL_CATEGORY_ID else None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,13 +66,21 @@ logging.basicConfig(
 )
 log = logging.getLogger("dm-bot")
 
+# ---------------------------------------------------------------------------
+# Intents — MESSAGE CONTENT et DM sont nécessaires pour lire le contenu des DM
+# ---------------------------------------------------------------------------
+
 intents = discord.Intents.default()
-intents.message_content = True
-intents.dm_messages = True
-intents.members = True
+intents.message_content = True  # nécessaire pour lire le texte des messages
+intents.dm_messages = True      # nécessaire pour recevoir les événements DM
+intents.members = True          # nécessaire pour lister les membres d'un rôle (!dmrole)
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
+# ---------------------------------------------------------------------------
+# Événements
+# ---------------------------------------------------------------------------
 
 @bot.event
 async def on_ready():
@@ -38,12 +90,15 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
+    # Ignore les messages du bot lui-même
     if message.author == bot.user:
         return
 
+    # Si le message vient d'un DM (pas d'un serveur)
     if isinstance(message.channel, discord.DMChannel):
         log.info(f"[DM reçu] {message.author} ({message.author.id}) : {message.content}")
 
+        # Relaye le DM dans un salon serveur si configuré
         if DM_LOG_CHANNEL_ID:
             channel = bot.get_channel(DM_LOG_CHANNEL_ID)
             if channel:
@@ -51,15 +106,22 @@ async def on_message(message: discord.Message):
                     f"📩 **DM de {message.author}** (`{message.author.id}`) :\n{message.content}"
                 )
 
+        # Exemple de réponse automatique — personnalise selon tes besoins
         await message.channel.send(
             f"J'ai bien reçu ton message : « {message.content} »"
         )
 
+    # IMPORTANT : nécessaire pour que les commandes (!dm, etc.) fonctionnent
     await bot.process_commands(message)
 
 
+# ---------------------------------------------------------------------------
+# Commande pour envoyer un DM à un utilisateur depuis un serveur
+# Usage : !dm <user_id> <message>
+# ---------------------------------------------------------------------------
+
 @bot.command(name="dm")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 async def send_dm(ctx: commands.Context, user_id: int, *, message: str):
     """Envoie un DM à un utilisateur via son ID Discord."""
     try:
@@ -88,8 +150,13 @@ async def send_dm_error(ctx: commands.Context, error):
         raise error
 
 
+# ---------------------------------------------------------------------------
+# Commande pour envoyer un DM à tous les membres ayant un rôle donné
+# Usage : !dmrole <@role ou ID_du_rôle> <message>
+# ---------------------------------------------------------------------------
+
 @bot.command(name="dmrole")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def send_dm_role(ctx: commands.Context, role: discord.Role, *, message: str):
     """Envoie un DM à tous les membres possédant un rôle donné."""
@@ -116,6 +183,7 @@ async def send_dm_role(ctx: commands.Context, role: discord.Role, *, message: st
             failed += 1
             log.exception(f"[DM échoué - rôle {role.name}] à {member} ({member.id})")
 
+        # Petite pause pour éviter de se faire limiter par Discord (rate limit)
         await asyncio.sleep(1)
 
     await status_msg.edit(
@@ -141,8 +209,13 @@ async def send_dm_role_error(ctx: commands.Context, error):
         raise error
 
 
+# ---------------------------------------------------------------------------
+# Commande pour envoyer un message dans un salon du serveur
+# Usage : !send <#salon> <message>
+# ---------------------------------------------------------------------------
+
 @bot.command(name="send")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def send_to_channel(ctx: commands.Context, channel: discord.TextChannel, *, message: str):
     """Envoie un message dans un salon donné."""
@@ -171,8 +244,13 @@ async def send_to_channel_error(ctx: commands.Context, error):
         raise error
 
 
+# ---------------------------------------------------------------------------
+# Commande pour créer un post dans un salon de type "Forum"
+# Usage : !post <#forum> "Titre du post" <message>
+# ---------------------------------------------------------------------------
+
 @bot.command(name="post")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def create_post(
     ctx: commands.Context,
@@ -208,8 +286,14 @@ async def create_post_error(ctx: commands.Context, error):
         raise error
 
 
+# ---------------------------------------------------------------------------
+# Commandes pour verrouiller / déverrouiller un post (thread)
+# Usage : !lock [ID_ou_mention_du_post]   (sans argument = verrouille le post actuel)
+#         !unlock [ID_ou_mention_du_post]
+# ---------------------------------------------------------------------------
+
 @bot.command(name="lock")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def lock_post(ctx: commands.Context, thread: discord.Thread = None):
     """Verrouille un post (thread). Sans argument, verrouille le post dans lequel la commande est tapée."""
@@ -246,7 +330,7 @@ async def lock_post_error(ctx: commands.Context, error):
 
 
 @bot.command(name="unlock")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def unlock_post(ctx: commands.Context, thread: discord.Thread = None):
     """Déverrouille un post (thread). Sans argument, déverrouille le post dans lequel la commande est tapée."""
@@ -282,8 +366,13 @@ async def unlock_post_error(ctx: commands.Context, error):
         raise error
 
 
+# ---------------------------------------------------------------------------
+# Commande pour supprimer complètement un post (thread)
+# Usage : !deletepost [ID_ou_mention_du_post]   (sans argument = supprime le post actuel)
+# ---------------------------------------------------------------------------
+
 @bot.command(name="deletepost")
-@commands.has_permissions(administrator=True)
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
 @commands.guild_only()
 async def delete_post(ctx: commands.Context, thread: discord.Thread = None):
     """Supprime définitivement un post (thread). Sans argument, supprime le post dans lequel la commande est tapée."""
@@ -300,6 +389,8 @@ async def delete_post(ctx: commands.Context, thread: discord.Thread = None):
     was_current_channel = thread.id == ctx.channel.id
 
     try:
+        # Si la commande est tapée dans le post à supprimer, prévenir avant
+        # de le supprimer, car la confirmation ne pourra pas être envoyée après.
         if was_current_channel:
             await ctx.send(f"🗑️ Suppression du post **{thread_name}**...")
 
@@ -326,6 +417,128 @@ async def delete_post_error(ctx: commands.Context, error):
     else:
         raise error
 
+
+# ---------------------------------------------------------------------------
+# Appel privé — crée un salon vocal privé + message vocal d'accueil
+# Usage : !call <@membre>
+#
+# IMPORTANT : un bot ne peut pas déclencher un vrai appel téléphonique/DM
+# Discord (cette fonction est réservée au client Discord, pas à l'API bot).
+# Cette commande recrée l'effet recherché : un salon vocal privé, visible
+# uniquement par la personne appelée et la Team DTK, où chacun peut entrer
+# et sortir librement (donc "s'appeler" dans les deux sens).
+# ---------------------------------------------------------------------------
+
+async def generate_call_announcement() -> str:
+    """Génère un fichier audio (mp3) avec le message d'accueil de l'appel."""
+    text = (
+        "Bonjour, un membre de la Team D T K va prendre votre appel en charge. "
+        "Merci de patienter. Vous pouvez nous appeler à tout moment, "
+        "et nous pouvons également vous appeler."
+    )
+    path = f"/tmp/call_announcement_{int(time.time())}.mp3"
+    tts = gTTS(text=text, lang="fr")
+    await asyncio.to_thread(tts.save, path)
+    return path
+
+
+@bot.command(name="call")
+@commands.has_permissions(administrator=True)  # restreint aux admins — à ajuster
+@commands.guild_only()
+async def call_user(ctx: commands.Context, member: discord.Member):
+    """Crée un salon vocal privé pour appeler un membre, avec une annonce vocale."""
+    guild = ctx.guild
+    category = guild.get_channel(CALL_CATEGORY_ID) if CALL_CATEGORY_ID else None
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False, connect=False),
+        member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+        guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
+    }
+    if STAFF_ROLE_ID:
+        staff_role = guild.get_role(STAFF_ROLE_ID)
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True
+            )
+
+    channel_name = f"appel-{member.name}"[:100]
+
+    try:
+        voice_channel = await guild.create_voice_channel(
+            channel_name, overwrites=overwrites, category=category
+        )
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission de créer un salon vocal.")
+        return
+    except Exception as e:
+        await ctx.send(f"❌ Erreur lors de la création du salon : {e}")
+        log.exception("Erreur lors de la création du salon d'appel")
+        return
+
+    await ctx.send(f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention}")
+
+    try:
+        await member.send(
+            f"📞 Un appel privé a été ouvert pour toi sur **{guild.name}**.\n"
+            f"Rejoins le salon vocal **{voice_channel.name}** quand tu veux — "
+            "un membre de la Team DTK va prendre ton appel en charge."
+        )
+    except discord.Forbidden:
+        pass  # La personne a fermé ses DM — on continue quand même
+
+    # Le bot rejoint le salon et joue le message vocal d'accueil
+    audio_path = None
+    try:
+        vc = await voice_channel.connect()
+        audio_path = await generate_call_announcement()
+        vc.play(discord.FFmpegPCMAudio(audio_path))
+        while vc.is_playing():
+            await asyncio.sleep(1)
+        await vc.disconnect()
+    except Exception as e:
+        log.exception("Erreur lors de la lecture du message vocal d'accueil")
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+
+
+@call_user.error
+async def call_user_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage : `!call <@membre>`")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Supprime automatiquement un salon d'appel une fois qu'il est vide depuis 30 secondes."""
+    channel = before.channel
+    if channel is None or not channel.name.startswith("appel-"):
+        return
+
+    await asyncio.sleep(30)
+
+    # Re-vérifie que le salon existe toujours et est toujours vide avant de le supprimer
+    refreshed = discord.utils.get(channel.guild.voice_channels, id=channel.id)
+    if refreshed and len(refreshed.members) == 0:
+        try:
+            await refreshed.delete()
+            log.info(f"[Salon d'appel supprimé] {refreshed.name}")
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Lancement du bot
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     if not TOKEN:
