@@ -14,10 +14,11 @@ Fonctionnalités :
 - Les commandes !lock et !unlock permettent de verrouiller/déverrouiller
   un post.
 - La commande !deletepost permet de supprimer définitivement un post.
-- La commande !call ouvre un salon vocal privé avec un membre, avec un
-  message vocal d'accueil. Accessible à TOUT LE MONDE pour s'appeler
-  soi-même (!call sans argument) ; cibler quelqu'un d'autre (!call
-  @membre) reste réservé aux admins.
+- La commande !call ouvre un salon vocal privé avec un membre : musique
+  d'attente quelques secondes, puis annonce vocale de prise en charge.
+  Accessible à TOUT LE MONDE pour s'appeler soi-même (!call sans
+  argument) ; cibler quelqu'un d'autre (!call @membre) reste réservé
+  aux admins.
 - Les commandes !hold et !unhold mettent un appel en attente (sourdine +
   message vocal) puis le reprennent.
 - Les commandes !closecalls et !opencalls permettent de fermer/rouvrir
@@ -61,9 +62,17 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DM_LOG_CHANNEL_ID = os.getenv("DM_LOG_CHANNEL_ID")
 DM_LOG_CHANNEL_ID = int(DM_LOG_CHANNEL_ID) if DM_LOG_CHANNEL_ID else None
 
-# ID du rôle "Team DTK" (ou équivalent) qui doit voir/rejoindre les appels privés.
-STAFF_ROLE_ID = os.getenv("STAFF_ROLE_ID")
-STAFF_ROLE_ID = int(STAFF_ROLE_ID) if STAFF_ROLE_ID else None
+# ID(s) des rôles "Team DTK" (ou équivalents) qui doivent voir/rejoindre les
+# appels privés. Plusieurs rôles peuvent être autorisés, séparés par des
+# virgules, ex: STAFF_ROLE_IDS=111111111111111111,222222222222222222
+STAFF_ROLE_IDS_RAW = os.getenv("STAFF_ROLE_IDS") or os.getenv("STAFF_ROLE_ID")
+STAFF_ROLE_IDS = (
+    [int(rid.strip()) for rid in STAFF_ROLE_IDS_RAW.split(",") if rid.strip()]
+    if STAFF_ROLE_IDS_RAW
+    else []
+)
+# Gardé pour compatibilité avec le reste du code (premier rôle configuré, ou None)
+STAFF_ROLE_ID = STAFF_ROLE_IDS[0] if STAFF_ROLE_IDS else None
 
 # ID d'une catégorie où ranger les salons d'appel créés. Optionnel.
 CALL_CATEGORY_ID = os.getenv("CALL_CATEGORY_ID")
@@ -531,6 +540,68 @@ async def open_calls_error(ctx: commands.Context, error):
         raise error
 
 
+# Salons en attente qu'un membre de la Team DTK les rejoigne :
+# {channel_id: asyncio.Event}
+waiting_calls: dict = {}
+
+
+async def play_call_intro(voice_channel: discord.VoiceChannel, max_wait_seconds: float = 1800):
+    """Joue la musique d'attente en boucle JUSQU'À ce qu'un membre de la Team
+    DTK (ou un admin) rejoigne le salon, puis l'interrompt et annonce la prise
+    en charge. Une limite de sécurité (30 min par défaut) évite que le bot
+    reste connecté indéfiniment si personne ne répond."""
+    guild = voice_channel.guild
+    vc = guild.voice_client
+    announce_path = None
+    event = asyncio.Event()
+    waiting_calls[voice_channel.id] = event
+
+    # Si un membre de la Team DTK est déjà présent au moment où l'appel démarre
+    if any(is_staff(m) for m in voice_channel.members if not m.bot):
+        event.set()
+
+    try:
+        if vc and vc.is_connected():
+            await vc.move_to(voice_channel)
+        else:
+            vc = await voice_channel.connect()
+
+        # Musique d'attente en boucle, jusqu'à l'arrivée de la Team DTK (ou expiration)
+        music_path = get_hold_music_path()
+        vc.play(discord.FFmpegPCMAudio(music_path, before_options="-stream_loop -1"))
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max_wait_seconds)
+            timed_out = False
+        except asyncio.TimeoutError:
+            timed_out = True
+
+        vc.stop()
+
+        # Message final
+        if timed_out:
+            text = (
+                "Aucun membre de la Team D T K n'a pu prendre votre appel pour le moment. "
+                "Merci de réessayer plus tard."
+            )
+        else:
+            text = "Un membre de la Team D T K a pris votre appel en charge !"
+
+        announce_path = await generate_tts_audio(text)
+        vc.play(discord.FFmpegPCMAudio(announce_path))
+        while vc.is_playing():
+            await asyncio.sleep(1)
+    finally:
+        waiting_calls.pop(voice_channel.id, None)
+        if vc and vc.is_connected():
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                log.exception("Erreur lors de la déconnexion du salon vocal")
+        if announce_path and os.path.exists(announce_path):
+            os.remove(announce_path)
+
+
 @bot.command(name="call")
 @commands.guild_only()
 async def call_user(ctx: commands.Context, member: discord.Member = None):
@@ -585,11 +656,12 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
         member: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
         guild.me: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
     }
-    staff_role = guild.get_role(STAFF_ROLE_ID) if STAFF_ROLE_ID else None
-    if staff_role:
-        overwrites[staff_role] = discord.PermissionOverwrite(
-            view_channel=True, connect=True, speak=True
-        )
+    for staff_role_id in STAFF_ROLE_IDS:
+        staff_role = guild.get_role(staff_role_id)
+        if staff_role:
+            overwrites[staff_role] = discord.PermissionOverwrite(
+                view_channel=True, connect=True, speak=True
+            )
 
     channel_name = f"appel-{member.name}"[:100]
 
@@ -605,9 +677,11 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
         log.exception("Erreur lors de la création du salon d'appel")
         return
 
-    staff_ping = staff_role.mention if staff_role else ""
+    staff_pings = " ".join(
+        guild.get_role(rid).mention for rid in STAFF_ROLE_IDS if guild.get_role(rid)
+    )
     await ctx.send(
-        f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention} {staff_ping}"
+        f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention} {staff_pings}"
     )
 
     if member != ctx.author:
@@ -620,14 +694,10 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
         except discord.Forbidden:
             pass  # La personne a fermé ses DM — on continue quand même
 
-    # Le bot rejoint le salon et joue le message vocal d'accueil
+    # Le bot rejoint le salon : musique d'attente quelques secondes, puis
+    # annonce qu'un membre de la Team DTK a pris l'appel en charge
     try:
-        await play_in_voice_channel(
-            voice_channel,
-            "Bonjour, un membre de la Team D T K va prendre votre appel en charge. "
-            "Merci de patienter. Vous pouvez nous appeler à tout moment, "
-            "et nous pouvons également vous appeler.",
-        )
+        await play_call_intro(voice_channel)
     except Exception:
         log.exception("Erreur lors de la lecture du message vocal d'accueil")
 
@@ -662,9 +732,12 @@ def resolve_voice_channel(ctx: commands.Context, member: discord.Member = None):
 
 
 def is_staff(member: discord.Member) -> bool:
-    if STAFF_ROLE_ID is None:
+    """Vrai si le membre a l'un des rôles Team DTK configurés, ou est administrateur."""
+    if member.guild_permissions.administrator:
+        return True
+    if not STAFF_ROLE_IDS:
         return False
-    return any(role.id == STAFF_ROLE_ID for role in member.roles)
+    return any(role.id in STAFF_ROLE_IDS for role in member.roles)
 
 
 # Salons actuellement en attente : {guild_id: {"voice_client": vc, "music_path": str}}
@@ -875,7 +948,17 @@ async def unhold_call_error(ctx: commands.Context, error):
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    """Supprime automatiquement un salon d'appel une fois qu'il est vide depuis 30 secondes."""
+    # Déclenche la fin de l'attente si un membre de la Team DTK rejoint un
+    # salon d'appel en cours de mise en attente (musique !call en cours).
+    if (
+        after.channel is not None
+        and not member.bot
+        and is_staff(member)
+        and after.channel.id in waiting_calls
+    ):
+        waiting_calls[after.channel.id].set()
+
+    # Supprime automatiquement un salon d'appel une fois qu'il est vide depuis 30 secondes.
     channel = before.channel
     if channel is None or not channel.name.startswith("appel-"):
         return
