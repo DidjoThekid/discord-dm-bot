@@ -22,6 +22,8 @@ Fonctionnalités :
   aux admins.
 - La commande !logreason (Team DTK) permet de noter par écrit, dans un
   salon dédié, le motif d'appel entendu à l'oral.
+- La commande !transfer (Team DTK) déplace tous les participants d'un
+  appel en cours vers un autre salon vocal, avec une annonce vocale.
 - Chaque appel (ouverture et fin, avec durée) est automatiquement
   journalisé dans un salon dédié si CALL_LOG_CHANNEL_ID est configuré.
 - Enregistrement audio des appels (optionnel, ENABLE_CALL_RECORDING=true) :
@@ -965,6 +967,83 @@ async def log_reason(ctx: commands.Context, member: discord.Member, *, reason: s
 async def log_reason_error(ctx: commands.Context, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Usage : `!logreason <@membre> <raison>`")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+# ---------------------------------------------------------------------------
+# Transférer un appel en cours vers un autre salon vocal
+# Usage : !transfer <#salon_cible> [@membre]
+# (sans @membre : transfère le salon d'appel où TU es actuellement connecté)
+# Réservé à la Team DTK (rôle(s) STAFF_ROLE_IDS) ou aux administrateurs.
+# ---------------------------------------------------------------------------
+
+@bot.command(name="transfer")
+@commands.guild_only()
+async def transfer_call(
+    ctx: commands.Context,
+    target_channel: discord.VoiceChannel,
+    member: discord.Member = None,
+):
+    """Transfère tous les participants d'un appel en cours vers un autre salon vocal existant."""
+    if not is_staff(ctx.author):
+        await ctx.send("❌ Seule la Team DTK peut transférer un appel.")
+        return
+
+    source_channel = resolve_voice_channel(ctx, member)
+    if source_channel is None:
+        await ctx.send(
+            "❌ Aucun appel en cours détecté. Connecte-toi au salon d'appel, ou précise "
+            "un membre déjà connecté : `!transfer <#salon> @membre`."
+        )
+        return
+    if source_channel.id == target_channel.id:
+        await ctx.send("❌ Le salon cible est le même que le salon actuel.")
+        return
+
+    members_to_move = [m for m in source_channel.members if not m.bot]
+    if not members_to_move:
+        await ctx.send("❌ Personne à transférer dans ce salon.")
+        return
+
+    moved = []
+    for m in members_to_move:
+        try:
+            await m.move_to(target_channel)
+            moved.append(m)
+        except discord.Forbidden:
+            pass
+
+    await ctx.send(
+        f"🔀 Appel transféré vers {target_channel.mention} ({len(moved)} personne(s) déplacée(s))."
+    )
+    log.info(f"[Appel transféré] {source_channel.name} → {target_channel.name} par {ctx.author}")
+
+    await log_call_event(
+        f"🔀 **Appel transféré** — {source_channel.name} → {target_channel.name}\n"
+        f"Transféré par : {ctx.author.mention}\n"
+        f"Heure : {discord_timestamp(discord.utils.utcnow())}"
+    )
+
+    # Annonce vocale dans le nouveau salon
+    try:
+        await play_in_voice_channel(
+            target_channel, "Votre appel a été transféré. Merci de patienter un instant."
+        )
+    except Exception:
+        log.exception("Erreur lors de l'annonce de transfert")
+
+
+@transfer_call.error
+async def transfer_call_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage : `!transfer <#salon_cible> [@membre]`")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Salon cible introuvable. Mentionne-le (#salon) ou donne son ID.")
     elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
     elif isinstance(error, commands.NoPrivateMessage):
