@@ -22,6 +22,12 @@ Fonctionnalités :
   aux admins.
 - La commande !logreason (Team DTK) permet de noter par écrit, dans un
   salon dédié, le motif d'appel entendu à l'oral.
+- Chaque appel (ouverture et fin, avec durée) est automatiquement
+  journalisé dans un salon dédié si CALL_LOG_CHANNEL_ID est configuré.
+- Enregistrement audio des appels (optionnel, ENABLE_CALL_RECORDING=true) :
+  annonce vocale de consentement obligatoire, fichier envoyé dans le salon
+  de journal à la fin de l'appel (découpé en plusieurs parties si trop
+  volumineux). Nécessite py-cord (voir requirements.txt).
 - Les commandes !hold et !unhold mettent un appel en attente (sourdine +
   message vocal) puis le reprennent.
 - Les commandes !closecalls et !opencalls permettent de fermer/rouvrir
@@ -53,6 +59,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from gtts import gTTS
+from pydub import AudioSegment
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -84,6 +91,17 @@ CALL_CATEGORY_ID = int(CALL_CATEGORY_ID) if CALL_CATEGORY_ID else None
 # ID du salon où envoyer le motif d'appel donné par la personne (!call). Optionnel.
 CALL_REASON_CHANNEL_ID = os.getenv("CALL_REASON_CHANNEL_ID")
 CALL_REASON_CHANNEL_ID = int(CALL_REASON_CHANNEL_ID) if CALL_REASON_CHANNEL_ID else None
+
+# ID du salon où marquer/journaliser chaque appel (ouverture + fin). Optionnel.
+CALL_LOG_CHANNEL_ID = os.getenv("CALL_LOG_CHANNEL_ID")
+CALL_LOG_CHANNEL_ID = int(CALL_LOG_CHANNEL_ID) if CALL_LOG_CHANNEL_ID else None
+
+# Active ou non l'enregistrement audio des appels (!call). Désactivé par défaut.
+# ⚠️ Si activé, une annonce vocale de consentement est OBLIGATOIREMENT jouée
+# au début de chaque appel pour informer les participants.
+ENABLE_CALL_RECORDING = os.getenv("ENABLE_CALL_RECORDING", "false").strip().lower() in (
+    "1", "true", "yes", "oui",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -551,6 +569,147 @@ async def open_calls_error(ctx: commands.Context, error):
 # {channel_id: asyncio.Event}
 waiting_calls: dict = {}
 
+# Heure d'ouverture de chaque salon d'appel : {channel_id: datetime}
+call_start_times: dict = {}
+
+
+def discord_timestamp(dt) -> str:
+    """Formate une date pour qu'elle s'affiche automatiquement à l'heure
+    locale de chaque personne sur Discord."""
+    return f"<t:{int(dt.timestamp())}:f>"
+
+
+async def log_call_event(text: str):
+    """Envoie un message dans le salon de journal des appels, si configuré."""
+    if not CALL_LOG_CHANNEL_ID:
+        return
+    channel = bot.get_channel(CALL_LOG_CHANNEL_ID)
+    if channel is None:
+        return
+    try:
+        await channel.send(text)
+    except discord.Forbidden:
+        log.warning("Impossible d'écrire dans le salon de journal des appels : permission manquante.")
+
+
+# ---------------------------------------------------------------------------
+# Enregistrement audio des appels (optionnel, désactivé par défaut)
+# ---------------------------------------------------------------------------
+
+# Salons dont l'enregistrement est en cours : {channel_id: asyncio.Event}
+# L'Event est déclenché une fois le fichier traité et envoyé.
+active_recordings: dict = {}
+
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # marge de sécurité (8 Mo) — ajuste si ton serveur autorise plus
+
+
+async def maybe_disconnect(vc: discord.VoiceClient, channel_id: int):
+    """Déconnecte le bot du vocal, SAUF si un enregistrement est en cours
+    pour ce salon (auquel cas on doit rester connecté)."""
+    if channel_id in active_recordings:
+        return
+    if vc and vc.is_connected():
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            log.exception("Erreur lors de la déconnexion du salon vocal")
+
+
+async def send_recording_to_log(path: str, channel_name: str):
+    """Envoie le fichier audio dans le salon de journal, en le découpant en
+    plusieurs morceaux s'il dépasse la limite d'upload de Discord."""
+    if not CALL_LOG_CHANNEL_ID:
+        os.remove(path)
+        return
+    channel = bot.get_channel(CALL_LOG_CHANNEL_ID)
+    if channel is None:
+        os.remove(path)
+        return
+
+    size = os.path.getsize(path)
+
+    if size <= MAX_UPLOAD_BYTES:
+        try:
+            await channel.send(
+                f"🎙️ Enregistrement de l'appel **{channel_name}**",
+                file=discord.File(path),
+            )
+        except discord.Forbidden:
+            log.warning("Impossible d'envoyer l'enregistrement : permission manquante.")
+        finally:
+            os.remove(path)
+        return
+
+    # Fichier trop volumineux : on le découpe en plusieurs morceaux
+    try:
+        audio = AudioSegment.from_file(path, format="mp3")
+        total_ms = len(audio)
+        bytes_per_ms = size / total_ms if total_ms else 1
+        chunk_ms = max(int(MAX_UPLOAD_BYTES / bytes_per_ms * 0.9), 10_000)
+
+        parts = []
+        start = 0
+        index = 1
+        while start < total_ms:
+            end = min(start + chunk_ms, total_ms)
+            chunk_path = f"{path}.part{index}.mp3"
+            audio[start:end].export(chunk_path, format="mp3", bitrate="64k")
+            parts.append(chunk_path)
+            start = end
+            index += 1
+
+        await channel.send(
+            f"🎙️ Enregistrement de l'appel **{channel_name}** "
+            f"(trop volumineux, envoyé en {len(parts)} parties) :"
+        )
+        for i, part_path in enumerate(parts, start=1):
+            try:
+                await channel.send(f"Partie {i}/{len(parts)}", file=discord.File(part_path))
+            except discord.Forbidden:
+                log.warning("Impossible d'envoyer une partie de l'enregistrement : permission manquante.")
+            finally:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
+    except Exception:
+        log.exception("Erreur lors du découpage de l'enregistrement")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+async def recording_finished_callback(sink, channel_id: int, channel_name: str, finished_event: asyncio.Event):
+    """Appelée par py-cord une fois l'enregistrement arrêté : mixe les pistes
+    de chaque participant en un seul fichier, puis l'envoie dans le salon de journal."""
+    combined_path = None
+    try:
+        audio_segments = []
+        for user_id, audio in sink.audio_data.items():
+            try:
+                audio.file.seek(0)
+                audio_segments.append(AudioSegment.from_file(audio.file, format="mp3"))
+            except Exception:
+                log.exception(f"Erreur lors de la lecture de la piste audio de {user_id}")
+
+        if not audio_segments:
+            log.info(f"[Enregistrement] Aucune piste audio à traiter pour {channel_name}")
+            return
+
+        combined = audio_segments[0]
+        for seg in audio_segments[1:]:
+            combined = combined.overlay(seg)
+
+        combined_path = f"/tmp/call_recording_{channel_id}.mp3"
+        combined.export(combined_path, format="mp3", bitrate="64k")
+
+        await send_recording_to_log(combined_path, channel_name)
+        combined_path = None  # déjà nettoyé par send_recording_to_log
+    except Exception:
+        log.exception("Erreur lors du traitement de l'enregistrement de l'appel")
+    finally:
+        if combined_path and os.path.exists(combined_path):
+            os.remove(combined_path)
+        finished_event.set()
+
 
 async def play_call_intro(
     voice_channel: discord.VoiceChannel,
@@ -578,6 +737,31 @@ async def play_call_intro(
             await vc.move_to(voice_channel)
         else:
             vc = await voice_channel.connect()
+
+        # Annonce OBLIGATOIRE de consentement si l'enregistrement est activé,
+        # puis démarrage de l'enregistrement audio.
+        if ENABLE_CALL_RECORDING:
+            consent_path = await generate_tts_audio(
+                "Cet appel est enregistré à des fins de suivi et de qualité de service."
+            )
+            vc.play(discord.FFmpegPCMAudio(consent_path))
+            while vc.is_playing():
+                await asyncio.sleep(1)
+            os.remove(consent_path)
+
+            finished_event = asyncio.Event()
+            active_recordings[voice_channel.id] = finished_event
+            try:
+                vc.start_recording(
+                    discord.sinks.MP3Sink(),
+                    recording_finished_callback,
+                    voice_channel.id,
+                    voice_channel.name,
+                    finished_event,
+                )
+            except Exception:
+                log.exception("Erreur lors du démarrage de l'enregistrement")
+                active_recordings.pop(voice_channel.id, None)
 
         # Question orale du motif de l'appel (uniquement pour un self-call)
         if ask_reason:
@@ -620,11 +804,7 @@ async def play_call_intro(
             await asyncio.sleep(1)
     finally:
         waiting_calls.pop(voice_channel.id, None)
-        if vc and vc.is_connected():
-            try:
-                await vc.disconnect(force=True)
-            except Exception:
-                log.exception("Erreur lors de la déconnexion du salon vocal")
+        await maybe_disconnect(vc, voice_channel.id)
         if question_path and os.path.exists(question_path):
             os.remove(question_path)
         if announce_path and os.path.exists(announce_path):
@@ -711,6 +891,15 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
     )
     await ctx.send(
         f"📞 Salon d'appel privé créé pour {member.mention} : {voice_channel.mention} {staff_pings}"
+    )
+
+    start_time = discord.utils.utcnow()
+    call_start_times[voice_channel.id] = start_time
+    await log_call_event(
+        f"📞 **Appel ouvert** — {member.mention} (`{member.id}`)\n"
+        f"Ouvert par : {ctx.author.mention}\n"
+        f"Salon : {voice_channel.name}\n"
+        f"Heure : {discord_timestamp(start_time)}"
     )
 
     if member != ctx.author:
@@ -992,7 +1181,7 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
         while vc.is_playing():
             await asyncio.sleep(1)
         os.remove(resume_path)
-        await vc.disconnect(force=True)
+        await maybe_disconnect(vc, voice_channel.id)
 
         await ctx.send(
             f"▶️ Appel repris dans **{voice_channel.name}** "
@@ -1040,9 +1229,41 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     # Re-vérifie que le salon existe toujours et est toujours vide avant de le supprimer
     refreshed = discord.utils.get(channel.guild.voice_channels, id=channel.id)
     if refreshed and len(refreshed.members) == 0:
+        end_time = discord.utils.utcnow()
+        start_time = call_start_times.pop(refreshed.id, None)
+        if start_time:
+            duration = end_time - start_time
+            duration_str = str(duration).split(".")[0]  # ex: 0:05:32
+        else:
+            duration_str = "inconnue"
+
+        # Si un enregistrement est en cours pour ce salon, on l'arrête et on
+        # attend que le fichier soit traité/envoyé avant de déconnecter/supprimer.
+        finished_event = active_recordings.pop(refreshed.id, None)
+        if finished_event:
+            vc = refreshed.guild.voice_client
+            if vc and vc.is_connected():
+                try:
+                    vc.stop_recording()
+                except Exception:
+                    log.exception("Erreur lors de l'arrêt de l'enregistrement")
+                try:
+                    await asyncio.wait_for(finished_event.wait(), timeout=60)
+                except asyncio.TimeoutError:
+                    log.warning("Timeout en attendant le traitement de l'enregistrement")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    log.exception("Erreur lors de la déconnexion après enregistrement")
+
         try:
             await refreshed.delete()
             log.info(f"[Salon d'appel supprimé] {refreshed.name}")
+            await log_call_event(
+                f"🔚 **Appel terminé** — {refreshed.name}\n"
+                f"Durée : {duration_str}\n"
+                f"Heure de fin : {discord_timestamp(end_time)}"
+            )
         except Exception:
             pass
 
