@@ -1151,6 +1151,15 @@ async def hold_call(ctx: commands.Context, member: discord.Member = None):
     muted = []
     vc = None
     try:
+        # Lance la génération de la voix tout de suite, en parallèle du reste,
+        # pour qu'elle soit déjà prête au moment où le bot rejoint le salon.
+        audio_task = asyncio.create_task(
+            generate_tts_audio(
+                "Votre appel a été mis en attente. Merci de patienter, "
+                "un membre de la Team D T K va reprendre la conversation."
+            )
+        )
+
         for vc_member in voice_channel.members:
             if vc_member.bot or is_staff(vc_member):
                 continue
@@ -1170,10 +1179,7 @@ async def hold_call(ctx: commands.Context, member: discord.Member = None):
             vc = await voice_channel.connect()
 
         # Message d'annonce de mise en attente
-        announce_path = await generate_tts_audio(
-            "Votre appel a été mis en attente. Merci de patienter, "
-            "un membre de la Team D T K va reprendre la conversation."
-        )
+        announce_path = await audio_task
         vc.play(discord.FFmpegPCMAudio(announce_path))
         while vc.is_playing():
             await asyncio.sleep(1)
@@ -1232,6 +1238,13 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
 
     unmuted = []
     try:
+        audio_task = asyncio.create_task(
+            generate_tts_audio(
+                "Merci de votre patience. Un membre de la Team D T K "
+                "reprend votre appel dès maintenant."
+            )
+        )
+
         for vc_member in voice_channel.members:
             if vc_member.bot or is_staff(vc_member):
                 continue
@@ -1250,10 +1263,7 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
         else:
             vc = await voice_channel.connect()
 
-        resume_path = await generate_tts_audio(
-            "Merci de votre patience. Un membre de la Team D T K "
-            "reprend votre appel dès maintenant."
-        )
+        resume_path = await audio_task
         vc.play(discord.FFmpegPCMAudio(resume_path))
         while vc.is_playing():
             await asyncio.sleep(1)
