@@ -768,10 +768,8 @@ async def play_call_intro(
         # Question orale du motif de l'appel (uniquement pour un self-call)
         if ask_reason:
             question_path = await generate_tts_audio(
-                "Bonjour et merci de votre appel. Pourriez-vous nous indiquer "
-                "oralement la raison de votre appel ? Un membre de la Team D T K "
-                "va prendre connaissance de votre demande et vous répondre très "
-                "rapidement."
+                "Bonjour et merci de votre appel. Un membre de la Team D T K "
+                "vous demandera la raison de votre appel."
             )
             vc.play(discord.FFmpegPCMAudio(question_path))
             while vc.is_playing():
