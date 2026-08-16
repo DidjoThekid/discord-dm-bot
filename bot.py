@@ -14,11 +14,14 @@ Fonctionnalités :
 - Les commandes !lock et !unlock permettent de verrouiller/déverrouiller
   un post.
 - La commande !deletepost permet de supprimer définitivement un post.
-- La commande !call ouvre un salon vocal privé avec un membre : musique
-  d'attente quelques secondes, puis annonce vocale de prise en charge.
+- La commande !call ouvre un salon vocal privé : le bot demande à l'oral
+  le motif de l'appel, joue une musique d'attente en boucle jusqu'à
+  l'arrivée d'un membre Team DTK, puis annonce vocale de prise en charge.
   Accessible à TOUT LE MONDE pour s'appeler soi-même (!call sans
   argument) ; cibler quelqu'un d'autre (!call @membre) reste réservé
   aux admins.
+- La commande !logreason (Team DTK) permet de noter par écrit, dans un
+  salon dédié, le motif d'appel entendu à l'oral.
 - Les commandes !hold et !unhold mettent un appel en attente (sourdine +
   message vocal) puis le reprennent.
 - Les commandes !closecalls et !opencalls permettent de fermer/rouvrir
@@ -77,6 +80,10 @@ STAFF_ROLE_ID = STAFF_ROLE_IDS[0] if STAFF_ROLE_IDS else None
 # ID d'une catégorie où ranger les salons d'appel créés. Optionnel.
 CALL_CATEGORY_ID = os.getenv("CALL_CATEGORY_ID")
 CALL_CATEGORY_ID = int(CALL_CATEGORY_ID) if CALL_CATEGORY_ID else None
+
+# ID du salon où envoyer le motif d'appel donné par la personne (!call). Optionnel.
+CALL_REASON_CHANNEL_ID = os.getenv("CALL_REASON_CHANNEL_ID")
+CALL_REASON_CHANNEL_ID = int(CALL_REASON_CHANNEL_ID) if CALL_REASON_CHANNEL_ID else None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -545,14 +552,20 @@ async def open_calls_error(ctx: commands.Context, error):
 waiting_calls: dict = {}
 
 
-async def play_call_intro(voice_channel: discord.VoiceChannel, max_wait_seconds: float = 1800):
-    """Joue la musique d'attente en boucle JUSQU'À ce qu'un membre de la Team
-    DTK (ou un admin) rejoigne le salon, puis l'interrompt et annonce la prise
-    en charge. Une limite de sécurité (30 min par défaut) évite que le bot
-    reste connecté indéfiniment si personne ne répond."""
+async def play_call_intro(
+    voice_channel: discord.VoiceChannel,
+    max_wait_seconds: float = 1800,
+    ask_reason: bool = False,
+):
+    """Joue (éventuellement) la question du motif d'appel à l'oral, puis la
+    musique d'attente en boucle JUSQU'À ce qu'un membre de la Team DTK (ou un
+    admin) rejoigne le salon, puis l'interrompt et annonce la prise en charge.
+    Une limite de sécurité (30 min par défaut) évite que le bot reste connecté
+    indéfiniment si personne ne répond."""
     guild = voice_channel.guild
     vc = guild.voice_client
     announce_path = None
+    question_path = None
     event = asyncio.Event()
     waiting_calls[voice_channel.id] = event
 
@@ -565,6 +578,20 @@ async def play_call_intro(voice_channel: discord.VoiceChannel, max_wait_seconds:
             await vc.move_to(voice_channel)
         else:
             vc = await voice_channel.connect()
+
+        # Question orale du motif de l'appel (uniquement pour un self-call)
+        if ask_reason:
+            question_path = await generate_tts_audio(
+                "Bonjour et merci de votre appel. Pourriez-vous nous indiquer "
+                "oralement la raison de votre appel ? Un membre de la Team D T K "
+                "va prendre connaissance de votre demande et vous répondre très "
+                "rapidement."
+            )
+            vc.play(discord.FFmpegPCMAudio(question_path))
+            while vc.is_playing():
+                await asyncio.sleep(1)
+            os.remove(question_path)
+            question_path = None
 
         # Musique d'attente en boucle, jusqu'à l'arrivée de la Team DTK (ou expiration)
         music_path = get_hold_music_path()
@@ -598,6 +625,8 @@ async def play_call_intro(voice_channel: discord.VoiceChannel, max_wait_seconds:
                 await vc.disconnect(force=True)
             except Exception:
                 log.exception("Erreur lors de la déconnexion du salon vocal")
+        if question_path and os.path.exists(question_path):
+            os.remove(question_path)
         if announce_path and os.path.exists(announce_path):
             os.remove(announce_path)
 
@@ -694,10 +723,10 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
         except discord.Forbidden:
             pass  # La personne a fermé ses DM — on continue quand même
 
-    # Le bot rejoint le salon : musique d'attente quelques secondes, puis
-    # annonce qu'un membre de la Team DTK a pris l'appel en charge
+    # Le bot rejoint le salon : question orale du motif (si self-call), musique
+    # d'attente en boucle, puis annonce qu'un membre de la Team DTK a pris l'appel en charge
     try:
-        await play_call_intro(voice_channel)
+        await play_call_intro(voice_channel, ask_reason=(member == ctx.author))
     except Exception:
         log.exception("Erreur lors de la lecture du message vocal d'accueil")
 
@@ -705,6 +734,49 @@ async def call_user(ctx: commands.Context, member: discord.Member = None):
 @call_user.error
 async def call_user_error(ctx: commands.Context, error):
     if isinstance(error, commands.MemberNotFound):
+        await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
+
+
+# ---------------------------------------------------------------------------
+# Noter par écrit le motif d'un appel, une fois entendu à l'oral
+# Usage : !logreason <@membre> <raison>
+# Réservé à la Team DTK (rôle(s) STAFF_ROLE_IDS) ou aux administrateurs.
+# ---------------------------------------------------------------------------
+
+@bot.command(name="logreason")
+@commands.guild_only()
+async def log_reason(ctx: commands.Context, member: discord.Member, *, reason: str):
+    """Envoie dans le salon dédié le motif d'appel donné oralement par un membre."""
+    if not is_staff(ctx.author):
+        await ctx.send("❌ Seule la Team DTK peut utiliser cette commande.")
+        return
+
+    reason_channel = bot.get_channel(CALL_REASON_CHANNEL_ID) if CALL_REASON_CHANNEL_ID else ctx.channel
+    if reason_channel is None:
+        await ctx.send("❌ Salon de motifs introuvable. Vérifie CALL_REASON_CHANNEL_ID.")
+        return
+
+    try:
+        await reason_channel.send(
+            f"📋 **Motif d'appel** (noté par {ctx.author.mention}) — "
+            f"{member.mention} (`{member.id}`)\n"
+            f"Raison : {reason}"
+        )
+        await ctx.send("✅ Motif enregistré.")
+        log.info(f"[Motif noté] {member} — {reason}")
+    except discord.Forbidden:
+        await ctx.send("❌ Le bot n'a pas la permission d'écrire dans le salon de motifs.")
+
+
+@log_reason.error
+async def log_reason_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Usage : `!logreason <@membre> <raison>`")
+    elif isinstance(error, commands.MemberNotFound):
         await ctx.send("❌ Membre introuvable. Mentionne-le (@membre) ou donne son ID.")
     elif isinstance(error, commands.NoPrivateMessage):
         await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
