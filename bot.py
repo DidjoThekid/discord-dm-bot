@@ -1084,14 +1084,15 @@ active_holds: dict = {}
 
 def get_hold_music_path() -> str:
     """Renvoie le chemin d'un fichier audio à utiliser comme musique d'attente.
-    Si un fichier assets/hold_music.mp3 existe dans le projet, il est utilisé
-    en priorité. Sinon, une petite mélodie douce est générée automatiquement
+    Cherche d'abord assets/hold_music.mp3, puis assets/hold_music.wav (le WAV
+    est un format brut, plus fiable, à privilégier en cas de souci avec un MP3
+    mal formé). Sinon, une petite mélodie douce est générée automatiquement
     (aucun droit d'auteur, générée localement)."""
-    custom_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "assets", "hold_music.mp3"
-    )
-    if os.path.exists(custom_path):
-        return custom_path
+    assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    for filename in ("hold_music.mp3", "hold_music.wav"):
+        custom_path = os.path.join(assets_dir, filename)
+        if os.path.exists(custom_path):
+            return custom_path
     return ensure_generated_hold_music()
 
 
