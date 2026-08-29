@@ -1089,10 +1089,25 @@ def get_hold_music_path() -> str:
     mal formé). Sinon, une petite mélodie douce est générée automatiquement
     (aucun droit d'auteur, générée localement)."""
     assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    log.info(f"[Musique d'attente] Dossier recherché : {assets_dir}")
+    try:
+        log.info(f"[Musique d'attente] Contenu de assets/ : {os.listdir(assets_dir)}")
+    except FileNotFoundError:
+        log.info("[Musique d'attente] Le dossier assets/ n'existe pas dans le conteneur.")
+
     for filename in ("hold_music.mp3", "hold_music.wav"):
         custom_path = os.path.join(assets_dir, filename)
         if os.path.exists(custom_path):
+            size = os.path.getsize(custom_path)
+            with open(custom_path, "rb") as f:
+                first_bytes = f.read(16).hex()
+            log.info(
+                f"[Musique d'attente] Fichier trouvé : {custom_path} "
+                f"— taille : {size} octets — premiers octets : {first_bytes}"
+            )
             return custom_path
+
+    log.info("[Musique d'attente] Aucun fichier personnalisé trouvé, utilisation de la mélodie générée.")
     return ensure_generated_hold_music()
 
 
