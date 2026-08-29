@@ -1084,10 +1084,10 @@ active_holds: dict = {}
 
 def get_hold_music_path() -> str:
     """Renvoie le chemin d'un fichier audio à utiliser comme musique d'attente.
-    Cherche d'abord assets/hold_music.mp3, puis assets/hold_music.wav (le WAV
-    est un format brut, plus fiable, à privilégier en cas de souci avec un MP3
-    mal formé). Sinon, une petite mélodie douce est générée automatiquement
-    (aucun droit d'auteur, générée localement)."""
+    Cherche, dans l'ordre : assets/hold_music.b64 (texte encodé en base64,
+    insensible à la corruption d'upload binaire — méthode recommandée),
+    assets/hold_music.mp3, puis assets/hold_music.wav. Sinon, une petite
+    mélodie douce est générée automatiquement (aucun droit d'auteur)."""
     assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
     log.info(f"[Musique d'attente] Dossier recherché : {assets_dir}")
     try:
@@ -1095,6 +1095,28 @@ def get_hold_music_path() -> str:
     except FileNotFoundError:
         log.info("[Musique d'attente] Le dossier assets/ n'existe pas dans le conteneur.")
 
+    # 1. Fichier texte encodé en base64 (méthode la plus fiable, pas de risque
+    # de corruption lors de l'upload sur GitHub, contrairement à un binaire).
+    b64_path = os.path.join(assets_dir, "hold_music.b64")
+    decoded_path = "/tmp/hold_music_from_b64.mp3"
+    if os.path.exists(b64_path):
+        if not os.path.exists(decoded_path) or os.path.getmtime(b64_path) > os.path.getmtime(decoded_path):
+            try:
+                import base64
+                with open(b64_path, "r") as f:
+                    b64_content = f.read().strip()
+                with open(decoded_path, "wb") as f:
+                    f.write(base64.b64decode(b64_content))
+                log.info(
+                    f"[Musique d'attente] Fichier décodé depuis base64 — "
+                    f"taille : {os.path.getsize(decoded_path)} octets"
+                )
+            except Exception:
+                log.exception("Erreur lors du décodage du fichier base64 de musique d'attente")
+        if os.path.exists(decoded_path) and os.path.getsize(decoded_path) > 0:
+            return decoded_path
+
+    # 2. Fichiers binaires classiques (mp3 puis wav)
     for filename in ("hold_music.mp3", "hold_music.wav"):
         custom_path = os.path.join(assets_dir, filename)
         if os.path.exists(custom_path):
