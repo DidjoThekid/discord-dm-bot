@@ -37,6 +37,10 @@ Fonctionnalités :
   et exclut la personne du salon vocal.
 - Tous les DM reçus sont affichés dans la console, et peuvent être relayés
   vers un salon serveur si tu configures DM_LOG_CHANNEL_ID.
+- Commandes de configuration (!setstaffroles, !setdmlogchannel,
+  !setcallcategory, !setreasonchannel, !setlogchannel, !showconfig) pour
+  régler le bot depuis Discord. Persistant entre les redéploiements
+  UNIQUEMENT si un Volume Railway est monté sur /data.
 
 Installation :
     pip install -U discord.py python-dotenv
@@ -56,6 +60,7 @@ import os
 import asyncio
 import time
 import logging
+import json
 
 import discord
 from discord.ext import commands
@@ -110,6 +115,73 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger("dm-bot")
+
+# ---------------------------------------------------------------------------
+# Configuration persistante (survit aux redéploiements) via un Volume Railway
+# monté sur /data. Si aucun volume n'est configuré, ce fichier reste local au
+# conteneur et sera perdu au prochain redéploiement (comme avant).
+# ---------------------------------------------------------------------------
+
+CONFIG_PATH = os.getenv("CONFIG_PATH", "/data/bot_config.json")
+
+
+def load_config_from_disk():
+    """Charge la configuration sauvegardée, si elle existe, et écrase les
+    valeurs par défaut issues des variables d'environnement."""
+    global STAFF_ROLE_IDS, STAFF_ROLE_ID, DM_LOG_CHANNEL_ID, CALL_CATEGORY_ID
+    global CALL_REASON_CHANNEL_ID, CALL_LOG_CHANNEL_ID, ENABLE_CALL_RECORDING
+    global call_service_open
+
+    if not os.path.exists(CONFIG_PATH):
+        log.info(f"[Config] Aucun fichier de configuration trouvé à {CONFIG_PATH} — valeurs par défaut utilisées.")
+        return
+
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            data = json.load(f)
+
+        if "staff_role_ids" in data:
+            STAFF_ROLE_IDS = data["staff_role_ids"]
+            STAFF_ROLE_ID = STAFF_ROLE_IDS[0] if STAFF_ROLE_IDS else None
+        if "dm_log_channel_id" in data:
+            DM_LOG_CHANNEL_ID = data["dm_log_channel_id"]
+        if "call_category_id" in data:
+            CALL_CATEGORY_ID = data["call_category_id"]
+        if "call_reason_channel_id" in data:
+            CALL_REASON_CHANNEL_ID = data["call_reason_channel_id"]
+        if "call_log_channel_id" in data:
+            CALL_LOG_CHANNEL_ID = data["call_log_channel_id"]
+        if "enable_call_recording" in data:
+            ENABLE_CALL_RECORDING = data["enable_call_recording"]
+        if "call_service_open" in data:
+            call_service_open = data["call_service_open"]
+
+        log.info(f"[Config] Configuration chargée depuis {CONFIG_PATH}")
+    except Exception:
+        log.exception("Erreur lors du chargement de la configuration persistée")
+
+
+def save_config_to_disk():
+    """Sauvegarde la configuration actuelle sur le volume persistant."""
+    data = {
+        "staff_role_ids": STAFF_ROLE_IDS,
+        "dm_log_channel_id": DM_LOG_CHANNEL_ID,
+        "call_category_id": CALL_CATEGORY_ID,
+        "call_reason_channel_id": CALL_REASON_CHANNEL_ID,
+        "call_log_channel_id": CALL_LOG_CHANNEL_ID,
+        "enable_call_recording": ENABLE_CALL_RECORDING,
+        "call_service_open": call_service_open,
+    }
+    try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+        log.info(f"[Config] Configuration sauvegardée dans {CONFIG_PATH}")
+    except Exception:
+        log.exception(
+            "Erreur lors de la sauvegarde de la configuration — "
+            "vérifie qu'un Volume Railway est bien monté sur /data."
+        )
 
 # ---------------------------------------------------------------------------
 # Intents — MESSAGE CONTENT et DM sont nécessaires pour lire le contenu des DM
@@ -520,9 +592,13 @@ async def generate_call_announcement() -> str:
 
 
 # État global du service d'appel : True = ouvert, False = fermé.
-# ⚠️ Cette valeur est réinitialisée à True à chaque redémarrage du bot
-# (par exemple lors d'un redéploiement Railway).
+# Valeur par défaut ; peut être écrasée par la configuration persistée
+# (survit aux redéploiements si un Volume Railway est monté sur /data).
 call_service_open = True
+
+# Charge la configuration sauvegardée (rôles, salons...), si elle existe.
+load_config_from_disk()
+
 
 
 @bot.command(name="closecalls")
@@ -1391,6 +1467,126 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             )
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Commandes de configuration — modifient les réglages du bot depuis Discord,
+# sans repasser par les variables Railway. Réservées aux administrateurs.
+# ---------------------------------------------------------------------------
+
+@bot.command(name="setstaffroles")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def set_staff_roles(ctx: commands.Context, roles: commands.Greedy[discord.Role]):
+    """Définit le(s) rôle(s) considéré(s) comme Team DTK. Usage : !setstaffroles @role1 [@role2 ...]"""
+    global STAFF_ROLE_IDS, STAFF_ROLE_ID
+    if not roles:
+        await ctx.send("Usage : `!setstaffroles @role1 [@role2 ...]`")
+        return
+    STAFF_ROLE_IDS = [r.id for r in roles]
+    STAFF_ROLE_ID = STAFF_ROLE_IDS[0]
+    save_config_to_disk()
+    await ctx.send(f"✅ Rôle(s) Team DTK mis à jour : {' '.join(r.mention for r in roles)}")
+
+
+@bot.command(name="setdmlogchannel")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def set_dm_log_channel(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Définit le salon de relais des DM reçus. Usage : !setdmlogchannel #salon (ou sans argument pour désactiver)"""
+    global DM_LOG_CHANNEL_ID
+    DM_LOG_CHANNEL_ID = channel.id if channel else None
+    save_config_to_disk()
+    await ctx.send(f"✅ Salon de relais des DM : {channel.mention if channel else 'désactivé'}")
+
+
+@bot.command(name="setcallcategory")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def set_call_category(ctx: commands.Context, category: discord.CategoryChannel = None):
+    """Définit la catégorie où ranger les salons d'appel. Usage : !setcallcategory <catégorie> (ou sans argument pour désactiver)"""
+    global CALL_CATEGORY_ID
+    CALL_CATEGORY_ID = category.id if category else None
+    save_config_to_disk()
+    await ctx.send(f"✅ Catégorie des salons d'appel : {category.name if category else 'désactivée (racine du serveur)'}")
+
+
+@bot.command(name="setreasonchannel")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def set_reason_channel(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Définit le salon où noter les motifs d'appel (!logreason). Usage : !setreasonchannel #salon"""
+    global CALL_REASON_CHANNEL_ID
+    CALL_REASON_CHANNEL_ID = channel.id if channel else None
+    save_config_to_disk()
+    await ctx.send(f"✅ Salon des motifs d'appel : {channel.mention if channel else 'désactivé'}")
+
+
+@bot.command(name="setlogchannel")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def set_log_channel(ctx: commands.Context, channel: discord.TextChannel = None):
+    """Définit le salon de journal des appels (ouverture/fin/transfert). Usage : !setlogchannel #salon"""
+    global CALL_LOG_CHANNEL_ID
+    CALL_LOG_CHANNEL_ID = channel.id if channel else None
+    save_config_to_disk()
+    await ctx.send(f"✅ Salon de journal des appels : {channel.mention if channel else 'désactivé'}")
+
+
+@bot.command(name="showconfig")
+@commands.has_permissions(administrator=True)
+@commands.guild_only()
+async def show_config(ctx: commands.Context):
+    """Affiche la configuration actuelle du bot."""
+    guild = ctx.guild
+    lines = ["**⚙️ Configuration actuelle du bot**"]
+
+    if STAFF_ROLE_IDS:
+        roles = [guild.get_role(rid) for rid in STAFF_ROLE_IDS]
+        roles_text = ", ".join(r.mention for r in roles if r) or "rôle(s) introuvable(s)"
+    else:
+        roles_text = "non configuré"
+    lines.append(f"• Rôles Team DTK : {roles_text}")
+
+    def channel_text(channel_id):
+        if not channel_id:
+            return "non configuré"
+        channel = bot.get_channel(channel_id)
+        return channel.mention if channel else f"introuvable (`{channel_id}`)"
+
+    lines.append(f"• Salon de relais des DM : {channel_text(DM_LOG_CHANNEL_ID)}")
+    lines.append(f"• Salon des motifs d'appel : {channel_text(CALL_REASON_CHANNEL_ID)}")
+    lines.append(f"• Salon de journal des appels : {channel_text(CALL_LOG_CHANNEL_ID)}")
+
+    if CALL_CATEGORY_ID:
+        category = guild.get_channel(CALL_CATEGORY_ID)
+        lines.append(f"• Catégorie des salons d'appel : {category.name if category else 'introuvable'}")
+    else:
+        lines.append("• Catégorie des salons d'appel : non configurée")
+
+    lines.append(f"• Enregistrement des appels : {'activé' if ENABLE_CALL_RECORDING else 'désactivé'}")
+    lines.append(f"• Service d'appel : {'ouvert' if call_service_open else 'fermé'}")
+
+    await ctx.send("\n".join(lines))
+
+
+@set_staff_roles.error
+@set_dm_log_channel.error
+@set_call_category.error
+@set_reason_channel.error
+@set_log_channel.error
+@show_config.error
+async def config_command_error(ctx: commands.Context, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Tu dois être administrateur pour utiliser cette commande.")
+    elif isinstance(error, commands.ChannelNotFound):
+        await ctx.send("❌ Salon introuvable. Mentionne-le (#salon) ou donne son ID.")
+    elif isinstance(error, commands.RoleNotFound):
+        await ctx.send("❌ Rôle introuvable. Mentionne-le (@rôle) ou donne son ID.")
+    elif isinstance(error, commands.NoPrivateMessage):
+        await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
+    else:
+        raise error
 
 
 # ---------------------------------------------------------------------------
