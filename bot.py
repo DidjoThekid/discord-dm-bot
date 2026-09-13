@@ -192,7 +192,7 @@ intents.message_content = True  # nécessaire pour lire le texte des messages
 intents.dm_messages = True      # nécessaire pour recevoir les événements DM
 intents.members = True          # nécessaire pour lister les membres d'un rôle (!dmrole)
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +203,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     log.info(f"Connecté en tant que {bot.user} (ID: {bot.user.id})")
     log.info("Le bot est prêt à envoyer/recevoir des DM.")
+    await bot.change_presence(activity=discord.CustomActivity(name="!help = commande"))
 
 
 @bot.event
@@ -1587,6 +1588,65 @@ async def config_command_error(ctx: commands.Context, error):
         await ctx.send("❌ Cette commande doit être utilisée dans un serveur, pas en DM.")
     else:
         raise error
+
+
+@bot.command(name="help")
+async def help_command(ctx: commands.Context):
+    """Affiche la liste des commandes disponibles."""
+    embed = discord.Embed(
+        title="📋 Commandes disponibles",
+        color=discord.Color.blurple(),
+    )
+
+    embed.add_field(
+        name="💬 Messages privés",
+        value=(
+            "**!dm** <ID_utilisateur> <message> — Envoie un DM à quelqu'un\n"
+            "**!dmrole** <@rôle> <message> — Envoie un DM à tout un rôle"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📌 Salons & Posts",
+        value=(
+            "**!send** <#salon> <message> — Envoie un message dans un salon\n"
+            '**!post** <#forum> "Titre" <message> — Crée un post dans un forum\n'
+            "**!lock** [ID_post] — Verrouille un post\n"
+            "**!unlock** [ID_post] — Déverrouille un post\n"
+            "**!deletepost** [ID_post] — Supprime un post"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📞 Appels vocaux",
+        value=(
+            "**!call** [@membre] — Ouvre un appel privé\n"
+            "**!hold** [@membre] — Met un appel en attente\n"
+            "**!unhold** [@membre] — Reprend un appel\n"
+            "**!transfer** <#salon> [@membre] — Transfère un appel\n"
+            "**!logreason** <@membre> <raison> — Note le motif d'un appel\n"
+            "**!closecalls** — Ferme le service d'appel\n"
+            "**!opencalls** — Rouvre le service d'appel"
+        ),
+        inline=False,
+    )
+
+    embed.add_field(
+        name="⚙️ Configuration (admin)",
+        value=(
+            "**!setstaffroles** @role(s) — Définit le(s) rôle(s) Team DTK\n"
+            "**!setdmlogchannel** #salon — Salon de relais des DM\n"
+            "**!setcallcategory** <catégorie> — Catégorie des salons d'appel\n"
+            "**!setreasonchannel** #salon — Salon des motifs d'appel\n"
+            "**!setlogchannel** #salon — Salon de journal des appels\n"
+            "**!showconfig** — Affiche la configuration actuelle"
+        ),
+        inline=False,
+    )
+
+    await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------
