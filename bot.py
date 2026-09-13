@@ -585,7 +585,7 @@ async def play_in_voice_channel(voice_channel: discord.VoiceChannel, text: str):
 async def generate_call_announcement() -> str:
     """Génère un fichier audio (mp3) avec le message d'accueil de l'appel."""
     text = (
-        "Bonjour, un membre de la Team D T K va prendre votre appel en charge. "
+        "Bonjour, un correspondant va prendre votre appel en charge. "
         "Merci de patienter. Vous pouvez nous appeler à tout moment, "
         "et nous pouvons également vous appeler."
     )
@@ -845,7 +845,7 @@ async def play_call_intro(
         # Question orale du motif de l'appel (uniquement pour un self-call)
         if ask_reason:
             question_path = await generate_tts_audio(
-                "Bonjour et merci de votre appel. Un membre de la Team D T K "
+                "Bonjour et merci de votre appel. Un correspondant "
                 "vous demandera la raison de votre appel."
             )
             vc.play(discord.FFmpegPCMAudio(question_path))
@@ -869,11 +869,11 @@ async def play_call_intro(
         # Message final
         if timed_out:
             text = (
-                "Aucun membre de la Team D T K n'a pu prendre votre appel pour le moment. "
+                "Aucun correspondant n'a pu prendre votre appel pour le moment. "
                 "Merci de réessayer plus tard."
             )
         else:
-            text = "Un membre de la Team D T K a pris votre appel en charge !"
+            text = "Un correspondant a pris votre appel en charge !"
 
         announce_path = await generate_tts_audio(text)
         vc.play(discord.FFmpegPCMAudio(announce_path))
@@ -1271,7 +1271,7 @@ async def hold_call(ctx: commands.Context, member: discord.Member = None):
         audio_task = asyncio.create_task(
             generate_tts_audio(
                 "Votre appel a été mis en attente. Merci de patienter, "
-                "un membre de la Team D T K va reprendre la conversation."
+                "un correspondant va reprendre la conversation."
             )
         )
 
@@ -1355,7 +1355,7 @@ async def unhold_call(ctx: commands.Context, member: discord.Member = None):
     try:
         audio_task = asyncio.create_task(
             generate_tts_audio(
-                "Merci de votre patience. Un membre de la Team D T K "
+                "Merci de votre patience. Un correspondant "
                 "reprend votre appel dès maintenant."
             )
         )
